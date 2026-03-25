@@ -111,8 +111,7 @@ def safe_token(s: str) -> str:
 
 def canonical_filename(microscope: str, parasite: str, user: str, image_id: str, ext: str) -> str:
     # short hash keeps names readable
-    return f"{safe_token(microscope)}__{safe_token(parasite)}__{safe_token(user)}__{image_id[:12]}{ext.lower()}"
-
+    return f"{safe_token(microscope).lower()}__{safe_token(parasite).lower()}__{safe_token(user).lower()}__{image_id[:12]}{ext.lower()}"
 
 def read_existing_csv(csv_path: Path) -> Tuple[Dict[str, Dict[str, str]], Set[str]]:
     """
