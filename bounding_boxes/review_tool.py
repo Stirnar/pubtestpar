@@ -33,6 +33,13 @@ def load_proposals(proposals_path):
         PROPOSALS[img_id].append(ann)
 
 
+def _default_label_for(filename):
+    parts = filename.split("__")
+    if len(parts) >= 2:
+        return parts[1].replace("_", " ").lower()
+    return "Noise"
+
+
 def init_working_state():
     for img_id, meta in IMAGE_META.items():
         fname = meta["file_name"]
@@ -41,7 +48,7 @@ def init_working_state():
             boxes.append({
                 "id": str(uuid.uuid4())[:8],
                 "bbox": ann["bbox"],
-                "label": "Noise",
+                "label": _default_label_for(fname),
                 "status": "pending",
                 "method": ann.get("detection_method", "unknown"),
                 "confidence": ann.get("score", 0),
@@ -213,7 +220,7 @@ def add_box():
     new_box = {
         "id": str(uuid.uuid4())[:8],
         "bbox": [int(data["x"]), int(data["y"]), int(data["w"]), int(data["h"])],
-        "label": data.get("label") or "Noise",
+        "label": data.get("label") or _default_label_for(fname),
         "status": "approved",
         "method": "manual",
         "confidence": 1.0,
@@ -239,13 +246,31 @@ def bulk_update():
 
     targets = [fname] if fname else list(WORKING.keys())
     count = 0
+    changed_ids = []  # track which boxes were actually flipped
     for fn in targets:
         for box in WORKING.get(fn, []):
             if box["status"] == "pending":
                 box["status"] = status
                 count += 1
+                changed_ids.append({"filename": fn, "box_id": box["id"]})
     auto_save()
-    return jsonify({"ok": True, "updated": count})
+    return jsonify({"ok": True, "updated": count, "changed": changed_ids})
+
+@app.route("/api/bulk_revert", methods=["POST"])
+def bulk_revert():
+    """Revert a specific list of boxes back to pending (undo a prior bulk action)."""
+    data = request.json
+    targets = data.get("changed", [])  # list of {filename, box_id}
+    count = 0
+    for t in targets:
+        fn, bid = t.get("filename"), t.get("box_id")
+        for box in WORKING.get(fn, []):
+            if box["id"] == bid:
+                box["status"] = "pending"
+                count += 1
+                break
+    auto_save()
+    return jsonify({"ok": True, "reverted": count})
 
 @app.route("/api/stats")
 def stats():
@@ -452,6 +477,30 @@ kbd { background:var(--bg-2); border:1px solid var(--border); border-radius:2px;
 ::-webkit-scrollbar { width:5px; }
 ::-webkit-scrollbar-track { background:transparent; }
 ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+
+.zoom-ind { position:absolute; top:10px; left:10px; z-index:5;
+  background:rgba(17,24,32,0.85); border:1px solid var(--border); border-radius:3px;
+  padding:5px 9px; font-family:var(--mono); font-size:10px; color:var(--text-2);
+  pointer-events:none; display:flex; gap:10px; align-items:center; }
+.zoom-ind .btn-grp { display:flex; gap:3px; pointer-events:auto; }
+.zoom-ind button { background:var(--bg-2); border:1px solid var(--border); color:var(--text-2);
+  font-family:var(--mono); font-size:10px; width:20px; height:20px; border-radius:2px;
+  cursor:pointer; padding:0; line-height:1; }
+.zoom-ind button:hover { color:var(--text-1); border-color:var(--border-hi); }
+
+.vis-panel { padding:6px 10px 8px; border-bottom:1px solid var(--border); }
+.vis-row { display:flex; gap:4px; margin-bottom:5px; }
+.vis-row .btn { flex:1; font-size:9px; padding:4px 6px; }
+.vis-row .btn.on { background:var(--purple-bg); border-color:var(--purple); color:var(--purple); }
+.vis-labels { display:flex; flex-wrap:wrap; gap:3px; margin-top:4px; }
+.vis-lbl { font-family:var(--mono); font-size:9px; padding:2px 6px; border-radius:2px;
+  background:var(--bg-2); border:1px solid var(--border); color:var(--text-2); cursor:pointer;
+  transition:all .1s; }
+.vis-lbl:hover { background:var(--bg-3); }
+.vis-lbl.off { opacity:0.35; text-decoration:line-through; }
+.vis-lbl.all-shown { background:var(--blue-bg); border-color:var(--blue); color:var(--blue); }
+.vis-title { font-family:var(--mono); font-size:9px; font-weight:600; text-transform:uppercase;
+  letter-spacing:1.5px; color:var(--text-3); margin:4px 0 3px; }
 </style>
 </head>
 <body>
@@ -489,14 +538,29 @@ kbd { background:var(--bg-2); border:1px solid var(--border); border-radius:2px;
   <div class="canvas-wrap" id="cw">
     <div class="empty" id="empty"><div class="icon">🔬</div><p>Select an image to review</p></div>
     <canvas id="cv" style="display:none"></canvas>
+    <div class="zoom-ind" id="zoomInd" style="display:none">
+      <span id="zoomLbl">100%</span>
+      <div class="btn-grp">
+        <button onclick="zoomBy(1/1.25)" title="Zoom out">−</button>
+        <button onclick="zoomReset()" title="Reset">⟲</button>
+        <button onclick="zoomBy(1.25)" title="Zoom in">+</button>
+      </div>
+    </div>
   </div>
 
   <div class="right">
     <div class="ptitle">Detections</div>
     <div class="box-ctrls">
-      <button class="btn ap" onclick="setAll('approved')">✓ ALL</button>
-      <button class="btn rj" onclick="setAll('rejected')">✕ ALL</button>
+      <button class="btn ap" id="btnAllAp" onclick="setAll('approved')">✓ ALL</button>
+      <button class="btn rj" id="btnAllRj" onclick="setAll('rejected')">✕ ALL</button>
       <button class="btn dr" onclick="toggleDraw()" id="dbtn">+ DRAW</button>
+    </div>
+    <div class="vis-panel">
+      <div class="vis-title">Visibility</div>
+      <div class="vis-row">
+        <button class="btn" id="btnHideAll" onclick="toggleHideAll()">Hide All</button>
+      </div>
+      <div class="vis-labels" id="visLabels"></div>
     </div>
     <div class="blist" id="blist"></div>
   </div>
@@ -505,14 +569,19 @@ kbd { background:var(--bg-2); border:1px solid var(--border); border-radius:2px;
     <span><kbd>A</kbd> Approve</span>
     <span><kbd>R</kbd> Reject</span>
     <span><kbd>D</kbd> Draw</span>
+    <span><kbd>F</kbd> Draw maybe</span>
     <span><kbd>←</kbd><kbd>→</kbd> Images</span>
     <span><kbd>Tab</kbd> Next pending</span>
+    <span>Scroll to zoom · Drag to pan</span>
   </div>
 </div>
 
 <script>
-let imgs=[], ci=-1, cb=-1, draw=false, ds=null, dragging=false;
-let boxes={}, imgCache={}, scale=1, pan={x:0,y:0};
+let imgs=[], ci=-1, cb=-1, draw=false, drawMaybe=false, ds=null, dragging=false;
+let boxes={}, imgCache={}, scale=1, pan={x:0,y:0}, baseScale=1;
+let panning=false, panStart=null;
+let hideAll=false, hiddenLabels=new Set();
+let lastBulk={img:null, all:null, changed:null, status:null};
 const cv=document.getElementById('cv'), cx=cv.getContext('2d'), cw=document.getElementById('cw');
 
 async function init() {
@@ -540,6 +609,7 @@ async function selectImg(idx) {
     const m=imgs[ci];
     document.getElementById('empty').style.display='none';
     cv.style.display='block';
+    document.getElementById('zoomInd').style.display='flex';
 
     if (!boxes[m.filename]) {
         const r = await fetch(`/api/boxes/${m.filename}`);
@@ -548,9 +618,11 @@ async function selectImg(idx) {
 
     const show = (el) => {
         const aw=cw.clientWidth, ah=cw.clientHeight;
-        scale = Math.min(aw/el.naturalWidth, ah/el.naturalHeight)*0.95;
+        baseScale = Math.min(aw/el.naturalWidth, ah/el.naturalHeight)*0.95;
+        scale = baseScale;
         cv.width=aw; cv.height=ah;
         pan = {x:(aw-el.naturalWidth*scale)/2, y:(ah-el.naturalHeight*scale)/2};
+        updateZoomLabel();
         paint();
     };
 
@@ -560,7 +632,9 @@ async function selectImg(idx) {
         el.onload=()=>{ imgCache[m.filename]=el; show(el); };
         el.src=`/api/image/${m.filename}`;
     }
-    renderList(); renderBoxes();
+    lastBulk={img:null, all:null, changed:null, status:null};
+    updateBulkButtons();
+    renderList(); renderBoxes(); renderVisLabels();
 }
 
 function paint() {
@@ -573,7 +647,12 @@ function paint() {
 
     const bx = boxes[m.filename]||[];
     bx.forEach((b,i) => {
-        const hl = i===cb;
+        const isSelected = i===cb;
+        if (!isSelected) {
+            if (hideAll) return;
+            if (hiddenLabels.has(b.label||'')) return;
+        }
+        const hl = isSelected;
         let col, fill;
         if (b.method==='manual') { col='#aa66ff'; fill='rgba(170,102,255,0.1)'; }
         else if (b.status==='approved') { col='#00d48a'; fill='rgba(0,212,138,0.08)'; }
@@ -647,11 +726,85 @@ async function setBox(i, st) {
 
 async function setAll(st) {
     const m=imgs[ci];
-    await fetch('/api/bulk_update',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({filename:m.filename,status:st})});
-    (boxes[m.filename]||[]).forEach(b=>{ if(b.status==='pending') b.status=st; });
-    refreshImageMeta(m.filename, boxes[m.filename]||[]);
+    const bx=boxes[m.filename]||[];
+    if (lastBulk.img===m.filename && lastBulk.status===st && lastBulk.changed) {
+        const toRevert = lastBulk.changed;
+        await fetch('/api/bulk_revert',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({changed:toRevert})});
+        const ids = new Set(toRevert.map(c=>c.box_id));
+        bx.forEach(b=>{ if(ids.has(b.id)) b.status='pending'; });
+        lastBulk={img:null, all:null, changed:null, status:null};
+    } else {
+        const r = await fetch('/api/bulk_update',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({filename:m.filename,status:st})});
+        const d = await r.json();
+        bx.forEach(b=>{ if(b.status==='pending') b.status=st; });
+        lastBulk={img:m.filename, all:false, changed:d.changed||[], status:st};
+    }
+    refreshImageMeta(m.filename, bx);
+    updateBulkButtons();
     renderBoxes(); renderList(); paint(); updateStats();
+}
+
+function updateBulkButtons() {
+    const apBtn=document.getElementById('btnAllAp');
+    const rjBtn=document.getElementById('btnAllRj');
+    const m=imgs[ci];
+    const activeAp = lastBulk.img===(m&&m.filename) && lastBulk.status==='approved';
+    const activeRj = lastBulk.img===(m&&m.filename) && lastBulk.status==='rejected';
+    apBtn.textContent = activeAp ? '↺ UNDO ✓' : '✓ ALL';
+    rjBtn.textContent = activeRj ? '↺ UNDO ✕' : '✕ ALL';
+}
+
+function renderVisLabels() {
+    const m=imgs[ci];
+    if (!m) { document.getElementById('visLabels').innerHTML=''; return; }
+    const bx=boxes[m.filename]||[];
+    const labels = Array.from(new Set(bx.map(b=>b.label||''))).sort();
+    document.getElementById('visLabels').innerHTML = labels.map(l => {
+        const display = l || '(no label)';
+        const off = hiddenLabels.has(l) ? ' off' : '';
+        return `<span class="vis-lbl${off}" onclick="toggleLabelVis('${l.replace(/'/g,"\\'")}')">${display}</span>`;
+    }).join('');
+}
+
+function toggleLabelVis(lbl) {
+    if (hiddenLabels.has(lbl)) hiddenLabels.delete(lbl);
+    else hiddenLabels.add(lbl);
+    renderVisLabels(); paint();
+}
+
+function toggleHideAll() {
+    hideAll = !hideAll;
+    const btn=document.getElementById('btnHideAll');
+    btn.textContent = hideAll ? 'Hidden' : 'Hide All';
+    btn.classList.toggle('on', hideAll);
+    paint();
+}
+
+function zoomBy(factor) {
+    const aw=cw.clientWidth, ah=cw.clientHeight;
+    const cxp=aw/2, cyp=ah/2;
+    const ix=(cxp-pan.x)/scale, iy=(cyp-pan.y)/scale;
+    scale = Math.max(baseScale*0.25, Math.min(scale*factor, baseScale*20));
+    pan.x = cxp - ix*scale;
+    pan.y = cyp - iy*scale;
+    updateZoomLabel(); paint();
+}
+
+function zoomReset() {
+    if (ci<0) return;
+    const m=imgs[ci], el=imgCache[m.filename];
+    if (!el) return;
+    const aw=cw.clientWidth, ah=cw.clientHeight;
+    scale = baseScale;
+    pan = {x:(aw-el.naturalWidth*scale)/2, y:(ah-el.naturalHeight*scale)/2};
+    updateZoomLabel(); paint();
+}
+
+function updateZoomLabel() {
+    const pct = Math.round((scale/baseScale)*100);
+    document.getElementById('zoomLbl').textContent = pct + '%';
 }
 
 async function bulkAll(st) {
@@ -667,7 +820,7 @@ async function updLabel(i, lbl) {
     bx[i].label=lbl;
     await fetch('/api/update_box',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({filename:m.filename,box_id:bx[i].id,label:lbl})});
-    paint();
+    renderVisLabels(); paint();
 }
 
 async function delBox(i) {
@@ -677,7 +830,7 @@ async function delBox(i) {
     bx.splice(i,1);
     if (cb>=bx.length) cb=bx.length-1;
     refreshImageMeta(m.filename, bx);
-    renderBoxes(); renderList(); paint(); updateStats();
+    renderBoxes(); renderVisLabels(); renderList(); paint(); updateStats();
 }
 
 function refreshImageMeta(fname, bx) {
@@ -686,40 +839,144 @@ function refreshImageMeta(fname, bx) {
 }
 
 function toggleDraw() {
-    draw=!draw;
+    if (draw && drawMaybe) {
+        drawMaybe=false;
+    } else {
+        draw=!draw;
+        drawMaybe=false;
+    }
     const btn=document.getElementById('dbtn');
     btn.classList.toggle('active',draw);
+    btn.textContent = draw ? '+ DRAWING' : '+ DRAW';
     cv.style.cursor=draw?'crosshair':'default';
 }
 
-cv.addEventListener('mousedown',e=>{
-    if (!draw||ci<0) return;
-    const r=cv.getBoundingClientRect();
-    const ix=(e.clientX-r.left-pan.x)/scale, iy=(e.clientY-r.top-pan.y)/scale;
-    ds={x:ix,y:iy,cx:ix,cy:iy}; dragging=true;
-});
-cv.addEventListener('mousemove',e=>{
-    if (!dragging||!ds) return;
-    const r=cv.getBoundingClientRect();
-    ds.cx=(e.clientX-r.left-pan.x)/scale; ds.cy=(e.clientY-r.top-pan.y)/scale;
-    paint();
-});
-cv.addEventListener('mouseup',async e=>{
-    if (!dragging||!ds) return;
-    dragging=false;
-    const x=Math.round(Math.min(ds.x,ds.cx)), y=Math.round(Math.min(ds.y,ds.cy));
-    const w=Math.round(Math.abs(ds.cx-ds.x)), h=Math.round(Math.abs(ds.cy-ds.y));
-    ds=null;
-    if (w<5||h<5) { paint(); return; }
+function toggleDrawMaybe() {
+    if (draw && !drawMaybe) {
+        drawMaybe=true;
+    } else {
+        draw=!draw;
+        drawMaybe=draw;
+    }
+    const btn=document.getElementById('dbtn');
+    btn.classList.toggle('active',draw);
+    btn.textContent = draw ? (drawMaybe ? '? DRAW MAYBE' : '+ DRAWING') : '+ DRAW';
+    cv.style.cursor=draw?'crosshair':'default';
+}
+
+function canvasToImage(clientX, clientY) {
+    const r = cv.getBoundingClientRect();
+    return {
+        x: (clientX - r.left - pan.x) / scale,
+        y: (clientY - r.top - pan.y) / scale
+    };
+}
+
+function hitTestBox(ix, iy) {
     const m=imgs[ci];
-    const res=await fetch('/api/add_box',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({filename:m.filename,x,y,w,h})});
-    const nb=await res.json();
-    boxes[m.filename].push(nb);
-    cb=boxes[m.filename].length-1;
-    refreshImageMeta(m.filename, boxes[m.filename]);
-    renderBoxes(); renderList(); paint(); updateStats(); toggleDraw();
+    if (!m) return -1;
+    const bx = boxes[m.filename] || [];
+    for (let i = bx.length - 1; i >= 0; i--) {
+        const b = bx[i];
+        if (i !== cb) {
+            if (hideAll) continue;
+            if (hiddenLabels.has(b.label||'')) continue;
+        }
+        const [x,y,w,h] = b.bbox;
+        if (ix >= x && ix <= x+w && iy >= y && iy <= y+h) return i;
+    }
+    return -1;
+}
+
+cv.addEventListener('mousedown',e=>{
+    if (ci<0) return;
+    const pt = canvasToImage(e.clientX, e.clientY);
+    if (draw) {
+        ds={x:pt.x, y:pt.y, cx:pt.x, cy:pt.y};
+        dragging=true;
+    } else {
+        panStart = {x:e.clientX, y:e.clientY, panX:pan.x, panY:pan.y, moved:false};
+        panning = true;
+        cv.style.cursor = 'grabbing';
+    }
 });
+
+cv.addEventListener('mousemove',e=>{
+    if (dragging && ds) {
+        const pt = canvasToImage(e.clientX, e.clientY);
+        ds.cx = pt.x; ds.cy = pt.y;
+        paint();
+    } else if (panning && panStart) {
+        const dx = e.clientX - panStart.x, dy = e.clientY - panStart.y;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) panStart.moved = true;
+        pan.x = panStart.panX + dx;
+        pan.y = panStart.panY + dy;
+        paint();
+    }
+});
+
+cv.addEventListener('mouseup',async e=>{
+    if (dragging && ds) {
+        dragging=false;
+        const x=Math.round(Math.min(ds.x,ds.cx)), y=Math.round(Math.min(ds.y,ds.cy));
+        const w=Math.round(Math.abs(ds.cx-ds.x)), h=Math.round(Math.abs(ds.cy-ds.y));
+        const wasMaybe = drawMaybe;
+        ds=null;
+        if (w<5||h<5) { paint(); return; }
+        const m=imgs[ci];
+        let labelOverride = null;
+        if (wasMaybe) {
+            const parts = m.filename.split('__');
+            const base = parts.length >= 2 ? parts[1].replace(/_/g,' ').toLowerCase() : 'noise';
+            labelOverride = base + '_maybe';
+        }
+        const body = {filename:m.filename, x, y, w, h};
+        if (labelOverride) body.label = labelOverride;
+        const res=await fetch('/api/add_box',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(body)});
+        const nb=await res.json();
+        boxes[m.filename].push(nb);
+        cb=boxes[m.filename].length-1;
+        refreshImageMeta(m.filename, boxes[m.filename]);
+        renderBoxes(); renderVisLabels(); renderList(); paint(); updateStats();
+        if (draw) {
+            draw=false; drawMaybe=false;
+            const btn=document.getElementById('dbtn');
+            btn.classList.remove('active');
+            btn.textContent='+ DRAW';
+            cv.style.cursor='default';
+        }
+    } else if (panning) {
+        panning=false;
+        cv.style.cursor = 'default';
+        if (panStart && !panStart.moved) {
+            const pt = canvasToImage(e.clientX, e.clientY);
+            const hit = hitTestBox(pt.x, pt.y);
+            if (hit >= 0) selBox(hit);
+        }
+        panStart = null;
+    }
+});
+
+cv.addEventListener('mouseleave',()=>{
+    if (panning) { panning=false; cv.style.cursor='default'; panStart=null; }
+});
+
+cv.addEventListener('wheel',e=>{
+    if (ci<0) return;
+    e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const ix = (mx - pan.x) / scale, iy = (my - pan.y) / scale;
+    const factor = e.deltaY < 0 ? 1.15 : 1/1.15;
+    const newScale = Math.max(baseScale*0.25, Math.min(scale*factor, baseScale*20));
+    if (newScale === scale) return;
+    scale = newScale;
+    pan.x = mx - ix * scale;
+    pan.y = my - iy * scale;
+    updateZoomLabel();
+    paint();
+}, {passive:false});
 
 document.addEventListener('keydown',e=>{
     if (e.target.tagName==='INPUT') return;
@@ -728,6 +985,7 @@ document.addEventListener('keydown',e=>{
         case 'a': case 'A': if(bx&&cb>=0) setBox(cb,'approved'); break;
         case 'r': if(bx&&cb>=0) setBox(cb,'rejected'); break;
         case 'd': case 'D': toggleDraw(); break;
+        case 'f': case 'F': toggleDrawMaybe(); break;
         case 'ArrowRight': e.preventDefault(); if(ci<imgs.length-1) selectImg(ci+1); break;
         case 'ArrowLeft': e.preventDefault(); if(ci>0) selectImg(ci-1); break;
         case 'ArrowDown': e.preventDefault(); if(bx&&cb<bx.length-1) selBox(cb+1); break;
@@ -751,9 +1009,12 @@ async function updateStats() {
 window.addEventListener('resize',()=>{
     if(ci>=0){const m=imgs[ci],el=imgCache[m.filename];
     if(el){const aw=cw.clientWidth,ah=cw.clientHeight;
-    scale=Math.min(aw/el.naturalWidth,ah/el.naturalHeight)*0.95;
+    const ratio = scale/baseScale;
+    baseScale = Math.min(aw/el.naturalWidth,ah/el.naturalHeight)*0.95;
+    scale = baseScale * ratio;
     cv.width=aw;cv.height=ah;
-    pan={x:(aw-el.naturalWidth*scale)/2,y:(ah-el.naturalHeight*scale)/2};paint();}}
+    pan={x:(aw-el.naturalWidth*scale)/2,y:(ah-el.naturalHeight*scale)/2};
+    updateZoomLabel(); paint();}}
 });
 
 init();
