@@ -246,7 +246,7 @@ def bulk_update():
 
     targets = [fname] if fname else list(WORKING.keys())
     count = 0
-    changed_ids = []  # track which boxes were actually flipped
+    changed_ids = []
     for fn in targets:
         for box in WORKING.get(fn, []):
             if box["status"] == "pending":
@@ -258,9 +258,8 @@ def bulk_update():
 
 @app.route("/api/bulk_revert", methods=["POST"])
 def bulk_revert():
-    """Revert a specific list of boxes back to pending (undo a prior bulk action)."""
     data = request.json
-    targets = data.get("changed", [])  # list of {filename, box_id}
+    targets = data.get("changed", [])
     count = 0
     for t in targets:
         fn, bid = t.get("filename"), t.get("box_id")
