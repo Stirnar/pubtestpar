@@ -1,0 +1,23 @@
+name: parasites
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13.5
+  - scikit-learn=1.7.1
+  - scikit-image=0.25.2
+  - scipy=1.16.1
+  - numpy
+  - pyyaml
+  - matplotlib
+  - pip
+  - pip:
+      - opencv-python-headless==4.13.0.92
+      - pillow
+      - google-cloud-storage
+      - flask
+      - tensorboard
+      # YOLO training/evaluation
+      - torch
+      - torchvision
+      - ultralytics
+      - pycocotools

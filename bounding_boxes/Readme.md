@@ -57,10 +57,10 @@ Usage:
     {
       "version": "1.0",
       "images": {
-        "Giardia_lamblia.jpg": {
+        "Trichuria_Trichuris.jpg": {
           "width": 952, "height": 1288,
           "annotations": [
-            {"bbox": [x, y, w, h], "label": "Giardia lamblia", "status": "approved"},
+            {"bbox": [x, y, w, h], "label": "Trichuria trichuris", "status": "approved"},
             {"bbox": [x, y, w, h], "label": "noise", "status": "approved"},
             {"bbox": [x, y, w, h], "label": "", "status": "rejected"},
           ]
@@ -75,13 +75,13 @@ Usage:
   "version": "1.0",
   "generator": "review_tool.py",
   "images": {
-    "Giardia_lamblia.jpg": {
+    "Trichuria_Trichuris.jpg": {
       "width": 952,
       "height": 1288,
       "annotations": [
         {
           "bbox": [747, 632, 38, 33],
-          "label": "Giardia lamblia",
+          "label": "Trichuria trichuris",
           "status": "approved",
           "method": "purple_stain"
         },

@@ -6,6 +6,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
+from external_datasets import label_from_image_filename
+
 
 @dataclass
 class BBox:
@@ -214,13 +216,16 @@ def results_to_coco(results, output_path):
     images, annotations = [], []
     ann_id = 1
     for img_id, r in enumerate(results, 1):
-        images.append({"id": img_id, "file_name": os.path.basename(r.image_path),
+        file_name = os.path.basename(r.image_path)
+        label = label_from_image_filename(file_name)
+        images.append({"id": img_id, "file_name": file_name,
                        "width": r.image_w, "height": r.image_h})
         for box in r.boxes:
             annotations.append({"id": ann_id, "image_id": img_id, "category_id": 1,
                 "bbox": [box.x, box.y, box.w, box.h], "area": box.w*box.h,
                 "iscrowd": 0, "score": round(box.confidence, 3),
-                "detection_method": box.method})
+                "detection_method": box.method,
+                "label": label, "category_name": label})
             ann_id += 1
     coco = {
         "info": {"description": "Parasite detection proposals", "version": "1.0",
@@ -230,6 +235,28 @@ def results_to_coco(results, output_path):
     }
     with open(output_path, 'w') as f:
         json.dump(coco, f, indent=2)
+
+def _needs_filename_label(value):
+    text = str(value or "").strip().lower()
+    return not text or text in {"noise", "proposal"}
+
+def _fill_candidate_labels(coco):
+    image_names = {image["id"]: image.get("file_name", "") for image in coco.get("images", [])}
+    updated = 0
+    for ann in coco.get("annotations", []):
+        file_name = image_names.get(ann.get("image_id"), "")
+        if not file_name:
+            continue
+        label_needs_update = _needs_filename_label(ann.get("label"))
+        category_needs_update = _needs_filename_label(ann.get("category_name"))
+        if label_needs_update or category_needs_update:
+            label = label_from_image_filename(file_name) if label_needs_update else str(ann["label"]).strip()
+            if label_needs_update:
+                ann["label"] = label
+            if category_needs_update:
+                ann["category_name"] = label
+            updated += 1
+    return updated
 
 def results_to_yolo(results, output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -257,7 +284,10 @@ def draw_results(image_path, result, output_path):
 
 def run_detection(args):
     """Main execution function for parasite detection."""
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = Path(args.output_dir)
+    coco_path = Path(args.output_json).expanduser() if getattr(args, "output_json", None) else output_dir / "proposals.json"
+    coco_path.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     det = ParasiteDetector(args.min_frac, args.max_frac, args.nms_iou)
 
     exts = {'.jpg','.jpeg','.png','.tif','.tiff','.bmp'}
@@ -270,16 +300,19 @@ def run_detection(args):
 
     print(f"Found {len(files)} images in {args.input_dir}")
 
-    coco_path = os.path.join(args.output_dir, "proposals.json")
     existing_coco = None
     already_processed = set()
+    updated_labels = 0
 
-    if not getattr(args, 'force', False) and os.path.isfile(coco_path):
+    if not getattr(args, 'force', False) and coco_path.is_file():
         try:
-            with open(coco_path) as f:
+            with coco_path.open() as f:
                 existing_coco = json.load(f)
             already_processed = {img["file_name"] for img in existing_coco.get("images", [])}
-            print(f"  Existing proposals.json has {len(already_processed)} images")
+            print(f"  Existing {coco_path.name} has {len(already_processed)} images")
+            updated_labels = _fill_candidate_labels(existing_coco)
+            if updated_labels:
+                print(f"  Filled filename-derived labels for {updated_labels} existing proposals")
         except (json.JSONDecodeError, KeyError):
             print(f"  Warning: could not parse existing {coco_path}, re-processing all")
             existing_coco = None
@@ -289,6 +322,9 @@ def run_detection(args):
     if skipped > 0:
         print(f"  Skipping {skipped} already-processed, {len(new_files)} new to process")
     if not new_files and existing_coco is not None:
+        if updated_labels:
+            with coco_path.open('w') as f:
+                json.dump(existing_coco, f, indent=2)
         print("  Nothing new to process.")
         return
 
@@ -312,8 +348,10 @@ def run_detection(args):
 
         for i, r in enumerate(results_list, 1):
             img_id = max_img_id + i
+            file_name = os.path.basename(r.image_path)
+            label = label_from_image_filename(file_name)
             existing_coco["images"].append({
-                "id": img_id, "file_name": os.path.basename(r.image_path),
+                "id": img_id, "file_name": file_name,
                 "width": r.image_w, "height": r.image_h
             })
             for box in r.boxes:
@@ -322,13 +360,14 @@ def run_detection(args):
                     "id": max_ann_id, "image_id": img_id, "category_id": 1,
                     "bbox": [box.x, box.y, box.w, box.h], "area": box.w * box.h,
                     "iscrowd": 0, "score": round(box.confidence, 3),
-                    "detection_method": box.method
+                    "detection_method": box.method,
+                    "label": label, "category_name": label,
                 })
 
-        with open(coco_path, 'w') as f:
+        with coco_path.open('w') as f:
             json.dump(existing_coco, f, indent=2)
     else:
-        results_to_coco(results_list, coco_path)
+        results_to_coco(results_list, str(coco_path))
 
     print(f"\n→ Proposals: {coco_path}")
 

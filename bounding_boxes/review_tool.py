@@ -6,6 +6,8 @@ import threading
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file, Response
 
+from external_datasets import label_from_image_filename
+
 app = Flask(__name__)
 
 IMAGES_DIR = ""
@@ -16,6 +18,13 @@ FNAME_TO_ID = {}     # file_name -> image_id
 WORKING = {}
 
 ANNOTATIONS_PATH = None  # where to auto-save
+
+
+def reset_state():
+    PROPOSALS.clear()
+    IMAGE_META.clear()
+    FNAME_TO_ID.clear()
+    WORKING.clear()
 
 
 def load_proposals(proposals_path):
@@ -34,10 +43,14 @@ def load_proposals(proposals_path):
 
 
 def _default_label_for(filename):
-    parts = filename.split("__")
-    if len(parts) >= 2:
-        return parts[1].replace("_", " ").lower()
-    return "Noise"
+    return label_from_image_filename(filename)
+
+
+def _label_or_default(label, filename):
+    text = str(label or "").strip()
+    if not text or text.lower() in {"noise", "proposal"}:
+        return _default_label_for(filename)
+    return text
 
 
 def init_working_state():
@@ -48,7 +61,7 @@ def init_working_state():
             boxes.append({
                 "id": str(uuid.uuid4())[:8],
                 "bbox": ann["bbox"],
-                "label": _default_label_for(fname),
+                "label": _label_or_default(ann.get("label") or ann.get("category_name"), fname),
                 "status": "pending",
                 "method": ann.get("detection_method", "unknown"),
                 "confidence": ann.get("score", 0),
@@ -99,14 +112,14 @@ def load_existing_annotations(ann_path):
             if best_iou > 0.5 and best_idx >= 0:
                 matched_saved.add(best_idx)
                 wb["status"] = saved_anns[best_idx]["status"]
-                wb["label"] = saved_anns[best_idx].get("label", "")
+                wb["label"] = _label_or_default(saved_anns[best_idx].get("label", ""), fname)
 
         for si, sa in enumerate(saved_anns):
             if si not in matched_saved and sa.get("method", "") == "manual":
                 working_boxes.append({
                     "id": str(uuid.uuid4())[:8],
                     "bbox": sa["bbox"],
-                    "label": sa.get("label", ""),
+                    "label": _label_or_default(sa.get("label", ""), fname),
                     "status": sa["status"],
                     "method": "manual",
                     "confidence": 1.0,
@@ -181,6 +194,7 @@ def list_images():
             "height": meta.get("height", 0),
             "total_boxes": len(boxes),
             "pending": pending,
+            "default_label": _default_label_for(fname),
         })
     return jsonify(result)
 
@@ -310,7 +324,7 @@ def export_coco():
             if box["status"] != "approved":
                 continue
             lbl = box["label"] if box["label"] else "parasite"
-            if lbl == "noise":
+            if lbl.lower() == "noise":
                 continue
             if lbl not in cat_map:
                 cat_map[lbl] = cat_id; cat_id += 1
@@ -335,7 +349,7 @@ def export_yolo():
     label_set = set()
     for boxes in WORKING.values():
         for b in boxes:
-            if b["status"] == "approved" and b["label"] and b["label"] != "noise":
+            if b["status"] == "approved" and b["label"] and b["label"].lower() != "noise":
                 label_set.add(b["label"])
     label_list = sorted(label_set)
     if not label_list:
@@ -351,7 +365,7 @@ def export_yolo():
             if box["status"] != "approved":
                 continue
             lbl = box["label"] if box["label"] else "parasite"
-            if lbl == "noise":
+            if lbl.lower() == "noise":
                 continue
             cls = label_to_idx.get(lbl, 0)
             bx = box["bbox"]
@@ -925,8 +939,8 @@ cv.addEventListener('mouseup',async e=>{
         const m=imgs[ci];
         let labelOverride = null;
         if (wasMaybe) {
-            const parts = m.filename.split('__');
-            const base = parts.length >= 2 ? parts[1].replace(/_/g,' ').toLowerCase() : 'noise';
+            const current = boxes[m.filename] && boxes[m.filename][cb];
+            const base = current && current.label ? current.label : (m.default_label || 'parasite');
             labelOverride = base + '_maybe';
         }
         const body = {filename:m.filename, x, y, w, h};
@@ -1024,6 +1038,7 @@ init();
 def run_review_tool(args):
     global IMAGES_DIR, ANNOTATIONS_PATH
 
+    reset_state()
     IMAGES_DIR = os.path.abspath(args.images)
     ANNOTATIONS_PATH = os.path.abspath(args.output)
 

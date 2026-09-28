@@ -12,6 +12,7 @@ bounding_boxes/detection_output
 bounding_boxes/uploads
 build/
 data/
+outputs/
 develop-eggs/
 dist/
 downloads/
@@ -21,6 +22,7 @@ lib/
 lib64/
 parts/
 results/
+runs/
 sdist/
 var/
 wheels/
