@@ -91,6 +91,8 @@ parser_detect.add_argument(
 parser_detect.add_argument("--min-frac", type=float, default=0.0003)
 parser_detect.add_argument("--max-frac", type=float, default=0.20)
 parser_detect.add_argument("--nms-iou", type=float, default=0.3)
+parser_detect.add_argument("--nms-containment", type=float, default=0.0,
+                           help="Also merge a box when this fraction of it lies inside a higher-confidence box (0 disables; try 0.8).")
 parser_detect.add_argument("--format", choices=["coco","yolo","both"], default="both")
 parser_detect.add_argument("--force", action="store_true", help="Reprocess all images even if the output JSON already exists.")
 parser_detect.add_argument("--no-vis", action="store_true", help="Skip visualization output")

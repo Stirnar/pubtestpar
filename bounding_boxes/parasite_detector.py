@@ -26,10 +26,13 @@ class DetectionResult:
 class ParasiteDetector:
 
     def __init__(self, min_object_frac=0.0003, max_object_frac=0.20,
-                 nms_iou_threshold=0.3, border_margin=10):
+                 nms_iou_threshold=0.3, border_margin=10, nms_containment=0.0):
         self.min_object_frac = min_object_frac
         self.max_object_frac = max_object_frac
         self.nms_iou_threshold = nms_iou_threshold
+        # Also drop a lower-confidence box when this fraction of its area lies
+        # inside a kept box (0 disables). Merges nested proposals that IoU misses.
+        self.nms_containment = nms_containment
         self.border_margin = border_margin
 
     def detect(self, image_path: str) -> DetectionResult:
@@ -99,6 +102,12 @@ class ParasiteDetector:
             ca = np.pi * r * r
             if ca == 0: continue
             if area / ca > 0.85 and r > min(h,w)*0.2 and r < max(h,w)*0.6:
+                # minEnclosingCircle is pulled outward by glare and halo; use the
+                # centroid and area-equivalent radius, which hug the visible disc.
+                m = cv2.moments(largest)
+                if m["m00"] > 0:
+                    cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
+                    r = float(np.sqrt(area / np.pi))
                 c = (int(cx), int(cy))
                 mask = np.zeros((h,w), dtype=np.uint8)
                 cv2.circle(mask, c, int(r), 255, -1)
@@ -187,6 +196,9 @@ class ParasiteDetector:
             if a < mn or a > mx: continue
             x,y,w,h = cv2.boundingRect(cnt)
             if max(w,h)/(min(w,h)+1e-6) > 8: continue
+            # Stain masks can fire on a tinted background and trace a sparse
+            # region whose bounding box spans most of the field of view.
+            if w*h > mx or a / (w*h) < 0.2: continue
             px, py = max(5,int(w*0.1)), max(5,int(h*0.1))
             boxes.append(BBox(x=max(0,x-px), y=max(0,y-py), w=w+2*px, h=h+2*py,
                               confidence=conf, method=method))
@@ -200,9 +212,20 @@ class ParasiteDetector:
             if i in sup: continue
             kept.append(bi)
             for j in range(i+1, len(boxes)):
-                if j not in sup and self._iou(bi, boxes[j]) > self.nms_iou_threshold:
+                if j in sup: continue
+                if (self._iou(bi, boxes[j]) > self.nms_iou_threshold
+                        or (self.nms_containment > 0
+                            and self._contained(boxes[j], bi) > self.nms_containment)):
                     sup.add(j)
         return kept
+
+    @staticmethod
+    def _contained(inner, outer):
+        """Fraction of `inner`'s area that lies inside `outer`."""
+        x1,y1 = max(inner.x,outer.x), max(inner.y,outer.y)
+        x2,y2 = min(inner.x+inner.w,outer.x+outer.w), min(inner.y+inner.h,outer.y+outer.h)
+        if x2<=x1 or y2<=y1: return 0.0
+        return (x2-x1)*(y2-y1) / (inner.w*inner.h)
 
     @staticmethod
     def _iou(a, b):
@@ -288,7 +311,8 @@ def run_detection(args):
     coco_path = Path(args.output_json).expanduser() if getattr(args, "output_json", None) else output_dir / "proposals.json"
     coco_path.parent.mkdir(parents=True, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
-    det = ParasiteDetector(args.min_frac, args.max_frac, args.nms_iou)
+    det = ParasiteDetector(args.min_frac, args.max_frac, args.nms_iou,
+                           nms_containment=getattr(args, "nms_containment", 0.0))
 
     exts = {'.jpg','.jpeg','.png','.tif','.tiff','.bmp'}
     try:
